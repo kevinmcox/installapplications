@@ -1,69 +1,55 @@
-# InstallApplications
+# InstallApplications Zsh (IAZ)
 
 ![InstallApplications icon](/icon/installapplications.png?raw=true)
 
-InstallApplications is an alternative to tools like [PlanB](https://github.com/google/macops-planb) where you can dynamically download packages for use with `InstallApplication`. This is useful for DEP bootstraps, allowing you to have a significantly reduced initial package that can easily be updated without repackaging your initial package.
+InstallApplications is an alternative to tools like [PlanB](https://github.com/google/macops-planb) where you can dynamically download packages for use with `InstallApplication`. This is useful for ADE bootstraps, allowing you to have a significantly reduced initial package that can easily be updated without repackaging your initial package.
 
-## Embedded Python
+## IAZ
 
-As of v2.0, InstallApplications now uses its own embedded python v3.8. This is due to Apple's upcoming removal of Python2.
+Version 3 of InstallApplications is a Zsh rewrite of the python original with the primary goal of removing the need for the embedded python. The result is a 99.9% reduction in package size to only 25 KB.
 
-Gurl has been updated from the Munki 4.0 release and tested with HTTPs and Basic Authentication. Further testing would be appreciate by the community.
+The second goal was to maintain backwards compatiblity with the JSON configuration so it will work as a drop-in replacment in most scenarios.
 
-### Embedded Modules
+There are a couple tradeoffs noted below, but these do not matter for my use case. This fork is published here in hopes it might be useful to others as well.
 
-To help admins with their scripts, the following modules have been added:
-PyObjC (required for gurl)
-Requests (for API driven tools)
+## Requirements
 
-Should the need come up for more modules, a PR should be made against the repo with proper justification
+**macOS 15 Sequoia or later.** v3.0+ depends on `/usr/bin/jq`, which Apple began shipping in macOS 15. Earlier macOS releases do not include `jq` and the bootstrap will fail with `"/usr/bin/jq is required but not present!"`.
 
-### 2to3
+If you need to deploy to macOS 14 or earlier, stick with InstallApplications 2.x (the Python-based release).
 
-`installapplications.py` and `postinstall` have been ran through 2to3 to automatically convert for Python3 compatibility.
+## Shell implementation
 
-### Building embedded python framework
+As of v3.0, InstallApplications is a single `zsh` script with no embedded Python framework. It relies only on tools that ship with macOS:
 
-To reduce the size of the git repository, you **must** create your own Python. To do this, simply run the `./build_python_framework` script within the repository.
+- `/bin/zsh` — script interpreter
+- `/usr/bin/curl` — HTTPS downloads (with optional basic auth and follow-redirects)
+- `/usr/bin/jq` — JSON parsing (**macOS 15+ only**; see [Requirements](#requirements))
+- `/usr/bin/shasum` — SHA256 hash validation
+- `/usr/bin/plutil`, `/usr/sbin/pkgutil`, `/usr/sbin/installer` — package handling
+- `/usr/bin/logger` — Console.app / unified logging visibility
 
-This process was tested on Catalina only.
+This drops the package size back down to a handful of kilobytes, removing the ~35 MB Python framework that previous releases bundled.
 
-```
-./build_python_framework
+### Migrating from 2.x
 
-Cloning relocatable-python tool from github...
-Cloning into '/tmp/relocatable-python-git'...
-remote: Enumerating objects: 20, done.
-remote: Counting objects: 100% (20/20), done.
-remote: Compressing objects: 100% (14/14), done.
-remote: Total 70 (delta 7), reused 16 (delta 6), pack-reused 50
-Unpacking objects: 100% (70/70), done.
-Downloading https://www.python.org/ftp/python/3.8.0/python-3.8.0-macosx10.9.pkg...
+If you are upgrading from a 2.x release:
 
-...
+- Any `rootscript` or `userscript` items in your `bootstrap.json` that were pinned to the embedded Python (`#!/Library/installapplications/Python.framework/Versions/Current/bin/python3`) will no longer work. Three migration paths:
+    - **Rewrite the script in shell** (`#!/bin/zsh` or `#!/bin/bash`). Best for simple bootstrap-time logic — no runtime to ship, and both shells are always present on macOS. This is what InstallApplications itself does now.
+    - **Install a Python runtime as one of the FIRST items in your bootstrap.json**, before any item that needs Python. Build a relocatable Python (e.g. via [relocatable-python](https://github.com/gregneagle/relocatable-python)), wrap it in a pkg, and place that pkg early in the `setupassistant` stage. Later items can then shebang against the installed framework's path.
+    - **Use a compiled binary or different language.** Swift, Go, Rust, anything pre-compiled in a pkg works.
 
-Done!
-Customized, relocatable framework is at ./Python.framework
-Moving Python.framework to InstallApplications payload folder
-```
+    Note: `/usr/bin/python3` is **not** a viable target on a freshly-ADE'd Mac — it's a stub that prompts the user to install Xcode Command Line Tools the first time it's invoked, which doesn't work non-interactively during SetupAssistant. Admins also can't pre-install Python out of band, because InstallApplications is literally the first thing running on the Mac.
+- The Python `middleware` extensibility hook has been removed. URL/header rewriting is no longer supported in-process; pre-sign your URLs server-side or use the existing `--headers` flag.
 
-### Package size increases
+#### Bug fixes you may notice in logs
 
-Unfortunately due to the embedded python, InstallApplications has significantly grown in size, from approximately 35Kb to 27.5 MB. The low size of InstallApplications has traditionally been one of it's greatest strengths, given how fragile `mdmclient` can be, but there is nothing that can be done here.
+v3.0 fixes three latent bugs in the Python implementation that affected logging and error handling. Most users won't have noticed them in normal operation, but the logs you collect post-upgrade will look slightly different:
 
-### Pinning python user/root scripts to embedded Python
-
-Python user/root scripts should be pinned to the embedded Python framework. Moving forward, **scripts not pinned will be unsupported**.
-
-It is recommended that you run `2to3` against your scripts to make them python3 compliant.
-
-`/usr/local/bin/2to3 -w /path/to/script`
-
-Then simply update the shebang on your python scripts to pin against the InstallApplications python framework.
-
-`#!/Library/installapplications/Python.framework/Versions/Current/bin/python3`
-
-You can find an example on how this was done by looking at InstallApplications' own `postinstall`
+- **Package installer output now appears in the daemon log.** In 2.x, the Python 2→3 conversion silently broke `installpackage`'s output capture (a bytes-vs-string mismatch swallowed by a bare `except: pass`). Packages installed correctly, but the InstallApplications daemon log contained no `installer:` lines whatsoever. v3.0 captures and forwards `installer -verbose` output line-by-line, so expect dozens of new lines per package install.
+- **Script-spawn failures no longer crash the run.** When `subprocess.Popen` raised `OSError` (missing interpreter, bad perms, etc.), the 2.x error handler crashed itself by calling `.decode()` on the exception object. v3.0 just logs the exit code and continues.
+- **Non-UTF-8 script output no longer crashes the run.** A script emitting non-UTF-8 bytes used to trigger `UnicodeDecodeError` in 2.x's `out.decode('utf-8')` calls, aborting the bootstrap. v3.0 captures bytes verbatim via shell command substitution; worst case the line looks garbled in the log.
 
 ## MDMs that support Custom DEP
 
@@ -87,13 +73,13 @@ Jamf Pro would install the `jamf` binary first, rather than InstallApplications.
 
 ## How this process works:
 
-During a DEP SetupAssistant workflow (with a supported MDM), the following will happen:
+During an ADE SetupAssistant workflow (with a supported MDM), the following will happen:
 
 1. MDM will send a push request utilizing `InstallApplication` to inform the device of a package installation.
 2. InstallApplications (this tool) will install and load its LaunchDaemon.
-2. InstallApplications (this tool) will install and load its LaunchAgent if in the proper context (installed outside of SetupAssistant).
-3. InstallApplications will begin to install your setupassistant packages (if configured) during the SetupAssistant.
-4. If userland packages are configured, InstallApplications will wait until the user is in their active session before installing.
+3. InstallApplications (this tool) will install and load its LaunchAgent if in the proper context (installed outside of SetupAssistant).
+4. InstallApplications will begin to install your setupassistant packages (if configured) during the SetupAssistant.
+5. If userland packages are configured, InstallApplications will wait until the user is in their active session before installing.
 6. InstallApplications will gracefully exit and kill its process.
 
 ## Stages
@@ -112,7 +98,7 @@ If the preflight script exits 1 or higher, InstallApplications will continue wit
 
 #### userland ####
 
-- Packages/rootscripts/userscripts that should be prioritized for download/installation but may need to be installed in the user's context. This could be your UI tooling that informs the user that a DEP workflow is being used. This stage will wait for a user session before installing.
+- Packages/rootscripts/userscripts that should be prioritized for download/installation but may need to be installed in the user's context. This could be your UI tooling that informs the user that an ADE workflow is being used. This stage will wait for a user session before installing.
 
 By utilizing setupassistant/userland, you can have **almost instant UI notifications** for your users.
 
@@ -121,7 +107,7 @@ By utilizing setupassistant/userland, you can have **almost instant UI notificat
 - InstallApplications will only begin installing userland when a user session has been started. This is to reduce the likelihood of your packages attempting to start UI elements during SetupAssistant.
 
 ### Signing
-You will **NEED** to sign this package for use with DEP/MDM. To acquire a signing certificate, join the [Apple Developers Program](https://developer.apple.com).
+You will **NEED** to sign this package for use with ADE/MDM. To acquire a signing certificate, join the [Apple Developers Program](https://developer.apple.com).
 
 Open the `build-info.json` file and specify your signing certificate.
 
@@ -134,7 +120,7 @@ Open the `build-info.json` file and specify your signing certificate.
 
 Note that you cannot use a `Mac Developer:` signing identity as that is used for application signing and not package signing. Attempting to use this will result in the following error:
 
-`An installer signing identity (not an application signing identity) is required for signing flat-style products.)`
+`An installer signing identity (not an application signing identity) is required for signing flat-style products.`
 
 ### Downloading and running scripts
 
@@ -143,7 +129,7 @@ InstallApplications can handle downloading and running scripts. Please see below
 For user scripts, you **must** set the folder path to the `userscripts` sub folder. This is due to the folder having world-wide permissions, allowing the LaunchAgent/User to delete the scripts when finished.
 
 ```json
-"file": "/Library/installapplications/userscripts/userland_exampleuserscript.py",
+"file": "/Library/installapplications/userscripts/userland_exampleuserscript.sh",
 ```
 
 ## Installing InstallApplications to another folder.
@@ -164,7 +150,7 @@ Simply specify a url to your json file in the LaunchDaemon plist, located in the
 <string>https://domain.tld</string>
 ```
 
-NOTE: If you alter the name of the LaunchAgent/LaunchDaemon or the Label, you will also need enable the arguments `laidentifier` and `ldidentifier` in the launchdaemon plist, and the `lapath` and `ldpath` varibles in the postinstall script.
+NOTE: If you alter the name of the LaunchAgent/LaunchDaemon or the Label, you will also need to enable the arguments `--laidentifier` and `--ldidentifier` in the LaunchDaemon plist, and update the `launch_agent_plist_name` and `launch_daemon_plist_name` variables in both the `preinstall` and `postinstall` scripts.
 
 ```xml
 <string>--laidentifier</string>
@@ -192,27 +178,19 @@ If you would like to pre-package your bootstrap.json file into your package and 
 #### Basic Auth
 Currently, Basic Authentication is only supported by using `--headers` flag.
 
-The authentication should be passed as a base64 encoded username:password, including the Basic string.
+The authentication should be passed as a base64 encoded `username:password`, prefixed with `Basic `.
 
-Example:
+Generate the value with:
 
-```python
-import base64
-
-base64.b64encode('test:test')
-'dGVzdDp0ZXN0'
-
-up = base64.b64encode('test:test')
-
-print 'Basic ' + up
-Basic dGVzdDp0ZXN0
+```bash
+echo -n 'username:password' | base64
 ```
 
-In the LaunchDaemon add the following:
+In the LaunchDaemon add the resulting string, prefixed with `Basic `:
 
 ```xml
 <string>--headers</string>
-<string>Basic dGVzdDp0ZXN0</string>
+<string>Basic dXNlcm5hbWU6cGFzc3dvcmQ=</string>
 ```
 
 #### Follow HTTP Redirects
@@ -231,48 +209,21 @@ Big Sur makes this code less stable. If you would like an example on how to laun
 
 ### Logging
 
-All root actions are logged at `/private/var/log/installapplications.log` as well as through NSLog. You can open up Console.app and search for `InstallApplications` to bring up all of the events.
+All events are written to `/var/log/installapplications/installapplications.log` (root context) and `/var/log/installapplications/installapplications.user.log` (user context), and are also forwarded to macOS unified logging via `logger`. Open Console.app and search for `InstallApplications` to view all events.
 
-All user actions are logged at `/var/tmp/installapplications/installapplications.user.log` as well as through NSLog. You can open up Console.app and search for `InstallApplications` to bring up all of the events.
-
-### Middleware
-
-Adapted from Munki's middleware [methodology](https://github.com/munki/munki/wiki/Middleware) and [code](https://github.com/munki/munki/blob/main/code/client/munkilib/fetch.py),
-
-This optional feature allows an admin to use third party code, or create their own code to manipulate InstallApplication's HTTP requests.
-
-#### Naming
-
-InstallApplications is looking for files the start with "middleware".
-Examples of good and bad middleware filenames:
-
-👍  middleware.py  
-👎  middleware  
-👎  my_middleware.py  
-👍  middleware_logic_taken_from_munki.py  
-
-#### Execution
-
-If you are using middleware, ensure the Python sha-bang is the same as InstallApplications, ie `#!/Library/installapplications/Python.framework/Versions/Current/bin/python3`.
-
-#### Location
-
-The middleware file must live in the same directory of InstallApplications folder (/Library/installapplications/), including your middleware in `payload/Library/installapplications/` should be sufficient enough to ensure its contained within the build package and receives proper permissions upon install.
-
-#### Requirements
-
-`process_request_options()` is the function that InstallApplications is looking for in the middleware. If InstallApplications doesn't find this function in the middleware it will abandon the processing of the url, and continue on.
-
-#### Middleware Notes
-
-- **Read:** [Munki's wiki page](https://github.com/munki/munki/wiki/Middleware) as this logic was taken directly from Munki, and utilizes the same underlying processes for modifying the url of an item.
-- **URL Overrides:** Install applications allows for the override of some options via the launchdaemon (see [Follow HTTP Redirects](#follow-http-redirects) for an example). The middleware processes items after the launchdaemon specified override is applied, meaning any manipulation to that via the middleware could override the specified options in the Launchd.
+Per-item runtime durations are written to `/var/log/installapplications/ia_item_runtimes.plist` as a nested dict `{stage: {item_name: seconds}}`, updated after each item completes.
 
 ### Building a package
 
-This repository has been setup for use with [munkipkg](https://github.com/munki/munki-pkg). Use `munkipkg` to build your signed installer with the following command:
+This repository is built with [munkipkg](https://github.com/munki/munki-pkg):
 
-`./munkipkg /path/to/repository`
+```bash
+munkipkg .
+```
+
+**Requires munkipkg from `main` after [PR #81](https://github.com/munki/munki-pkg/pull/81) (merged 2026-06-09).** That PR hardcoded `hostArchitectures="arm64,x86_64"` into munkipkg's Distribution template. Without it, the pkg munkipkg produces is treated as Intel-only by macOS Installer (and the `installer` CLI) and demands Rosetta on Apple Silicon — even though InstallApplications is arch-agnostic shell code. munki-pkg has no tagged releases, so update your local copy by pulling from main.
+
+Configure your signing identity in `build-info.json` (see [Signing](#signing) above) and `munkipkg` will sign the pkg as part of the build. Output lands in `build/InstallApplications-<version>.pkg`.
 
 ### SHA256 hashes
 
@@ -286,7 +237,7 @@ This guarantees that the package you place on the web for download is the packag
 
 The JSON structure is quite simple. You supply the following:
 
-- filepath (currently hardcoded to `/Library/installapplications`)
+- filepath (default `/Library/installapplications`; configurable via the `--iapath` LaunchDaemon flag)
 - url (any domain, but it should ideally be https://)
 - hash (SHA256)
 - name (define a name for the package, for debug logging and DEPNotify)
@@ -304,11 +255,11 @@ The following is an example JSON:
   "preflight": [
     {
       "donotwait": false,
-      "file": "/Library/installapplications/preflight_script.py",
+      "file": "/Library/installapplications/preflight_script.sh",
       "hash": "sha256 hash",
       "name": "Example Preflight Script",
       "type": "rootscript",
-      "url": "https://domain.tld/preflight_script.py",
+      "url": "https://domain.tld/preflight_script.sh",
       "retries": 5,
       "retrywait": 10
     }
@@ -333,25 +284,25 @@ The following is an example JSON:
       "packageid": "com.package.userland",
       "version": "1.0",
       "hash": "sha256 hash",
-      "name": "Stage 1 Package Name",
+      "name": "Userland Package Name",
       "skip_if": "x86_64",
       "type": "package",
       "retries": 5,
       "retrywait": 10
     },
     {
-      "file": "/Library/installapplications/userland_examplerootscript.py",
+      "file": "/Library/installapplications/userland_examplerootscript.sh",
       "hash": "sha256 hash",
       "name": "Example Script",
       "type": "rootscript",
-      "url": "https://domain.tld/userland_examplerootscript.py"
+      "url": "https://domain.tld/userland_examplerootscript.sh"
     },
     {
-      "file": "/Library/installapplications/userscripts/userland_exampleuserscript.py",
+      "file": "/Library/installapplications/userscripts/userland_exampleuserscript.sh",
       "hash": "sha256 hash",
       "name": "Example Script",
       "type": "userscript",
-      "url": "https://domain.tld/userland_exampleuserscript.py"
+      "url": "https://domain.tld/userland_exampleuserscript.sh"
     }
   ]
 }

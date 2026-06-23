@@ -6,14 +6,13 @@
 	<string>com.erikng.installapplications</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>/Library/installapplications/Python.framework/Versions/Current/bin/python3</string>
-		<string>/Library/installapplications/installapplications.py</string>
+		<string>/Library/installapplications/installapplications.sh</string>
 		<string>--jsonurl</string>
 		<string>https://domain.tld</string>
 		<!-- <string>--dry-run</string> -->
 		<!-- <string>--follow-redirects</string> -->
 		<!-- <string>--headers</string> -->
-		<!-- <<string>Basic ZXhhbXBsZV91c2VyOmV4YW1wbGVfcGFzc3dvcmQ=</string> -->
+		<!-- <string>Basic ZXhhbXBsZV91c2VyOmV4YW1wbGVfcGFzc3dvcmQ=</string> -->
 		<!-- <string>--iapath</string> -->
 		<!-- <string>/Library/installapplications/installapplications</string> -->
 		<!-- <string>--laidentifier</string> -->
